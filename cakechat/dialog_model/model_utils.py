@@ -1,31 +1,30 @@
-import os
-from collections import namedtuple
-from itertools import imap, islice, izip
+from itertools import islice
 
 import numpy as np
 
-from cakechat.config import BASE_CORPUS_NAME, TRAIN_CORPUS_NAME, WORD_EMBEDDING_DIMENSION, INPUT_CONTEXT_SIZE, \
-    HIDDEN_LAYER_DIMENSION, ENCODER_DEPTH, DECODER_DEPTH, INPUT_SEQUENCE_LENGTH, \
-    OUTPUT_SEQUENCE_LENGTH, GRAD_CLIP, ADADELTA_LEARNING_RATE, TRAIN_WORD_EMBEDDINGS_LAYER, DATA_DIR, \
-    DENSE_DROPOUT_RATIO, USE_SKIP_GRAM, W2V_WINDOW_SIZE, CONDITION_EMBEDDING_DIMENSION, DEFAULT_CONDITION, \
-    S3_MODELS_BUCKET_NAME, S3_W2V_REMOTE_DIR
+from cakechat.config import INPUT_CONTEXT_SIZE, INPUT_SEQUENCE_LENGTH, DEFAULT_CONDITION, OUTPUT_SEQUENCE_LENGTH, \
+    AUTOENCODER_MODE, RANDOM_SEED, INTX
+from cakechat.utils.data_types import Dataset
 from cakechat.utils.logger import get_logger
-from cakechat.utils.s3 import S3FileResolver
 from cakechat.utils.tee_file import file_buffered_tee
-from cakechat.utils.text_processing import SPECIAL_TOKENS, load_index_to_item, get_index_to_token_path
-from cakechat.utils.w2v import get_w2v_model, get_w2v_params_str
+from cakechat.utils.text_processing import SPECIAL_TOKENS
 
 _logger = get_logger(__name__)
 
-Dataset = namedtuple('Dataset', ['x', 'y', 'condition_ids'])
+
+class ModelLoaderException(Exception):
+    pass
 
 
 def transform_conditions_to_ids(conditions, condition_to_index, n_dialogs):
-    condition_ids_iterator = imap(
+    condition_ids_iterator = map(
         lambda condition: condition_to_index.get(condition, condition_to_index[DEFAULT_CONDITION]), conditions)
-    condition_ids = np.full(n_dialogs, condition_to_index[DEFAULT_CONDITION], dtype=np.int32)
+    condition_ids = np.full(n_dialogs, condition_to_index[DEFAULT_CONDITION], dtype=INTX)
+    # shape == (n_dialogs, )
     for sample_idx, condition_id in enumerate(condition_ids_iterator):
         condition_ids[sample_idx] = condition_id
+
+    # shape == (n_dialogs, 1)
     return condition_ids
 
 
@@ -51,7 +50,7 @@ def transform_contexts_to_token_ids(tokenized_contexts,
     :param max_context_len: maximum context length
     :param max_contexts_num: maximum number of contexts
     :param add_start_end: add start/end tokens to sequence
-    :return: X -- numpy array, dtype=np.int32, shape = (max_lines_num, max_context_len, max_line_len).
+    :return: X -- numpy array, dtype=INTX, shape = (max_lines_num, max_context_len, max_line_len).
     """
 
     if max_contexts_num is None:
@@ -59,8 +58,7 @@ def transform_contexts_to_token_ids(tokenized_contexts,
             raise TypeError('tokenized_lines should has list type if max_lines_num is not specified')
         max_contexts_num = len(tokenized_contexts)
 
-    X = np.full(
-        (max_contexts_num, max_context_len, max_line_len), token_to_index[SPECIAL_TOKENS.PAD_TOKEN], dtype=np.int32)
+    X = np.full((max_contexts_num, max_context_len, max_line_len), token_to_index[SPECIAL_TOKENS.PAD_TOKEN], dtype=INTX)
 
     for context_idx, context in enumerate(tokenized_contexts):
         if context_idx >= max_contexts_num:
@@ -94,7 +92,7 @@ def transform_lines_to_token_ids(tokenized_lines, token_to_index, max_line_len, 
     :param max_line_len: maximum number of tokens in a lineh
     :param max_lines_num: maximum number of lines
     :param add_start_end: add start/end tokens to sequence
-    :return: X -- numpy array, dtype=np.int32, shape = (max_lines_num, max_line_len).
+    :return: X -- numpy array, dtype=INTX, shape = (max_lines_num, max_line_len).
     """
 
     if max_lines_num is None:
@@ -102,7 +100,7 @@ def transform_lines_to_token_ids(tokenized_lines, token_to_index, max_line_len, 
             raise TypeError('tokenized_lines should has list type if max_lines_num is not specified')
         max_lines_num = len(tokenized_lines)
 
-    X = np.full((max_lines_num, max_line_len), token_to_index[SPECIAL_TOKENS.PAD_TOKEN], dtype=np.int32)
+    X = np.full((max_lines_num, max_line_len), token_to_index[SPECIAL_TOKENS.PAD_TOKEN], dtype=INTX)
 
     for line_idx, line in enumerate(tokenized_lines):
         if line_idx >= max_lines_num:
@@ -124,16 +122,16 @@ def transform_token_ids_to_sentences(y_ids, index_to_token):
     Transformation of each sentence ends when the end_token occurred.
     Skips start tokens.
 
-    :param y_ids: numpy array N_LINES x N_TOKENS, containing ids of all tokens to use
-    :param index_to_token: dictionary used for transforming
-    :return:
+    :param y_ids: numpy array of integers, shape (lines_num, tokens_num), represents token ids
+    :param index_to_token: dictionary to be used for transforming
+    :return: list of strings, list length = lines_num
     """
     n_responses, n_tokens = y_ids.shape
 
     responses = []
-    for resp_idx in xrange(n_responses):
+    for resp_idx in range(n_responses):
         response_tokens = []
-        for token_idx in xrange(n_tokens):
+        for token_idx in range(n_tokens):
             token_to_add = index_to_token[y_ids[resp_idx, token_idx]]
 
             if token_to_add in [SPECIAL_TOKENS.EOS_TOKEN, SPECIAL_TOKENS.PAD_TOKEN]:
@@ -143,9 +141,6 @@ def transform_token_ids_to_sentences(y_ids, index_to_token):
             response_tokens.append(token_to_add)
 
         response_str = ' '.join(response_tokens)
-        if not isinstance(response_str, unicode):
-            response_str = response_str.decode('utf-8')
-
         responses.append(response_str)
     return responses
 
@@ -156,18 +151,18 @@ def transform_context_token_ids_to_sentences(x_ids, index_to_token):
     Transformation of each sentence ends when the end_token occurred.
     Skips start tokens.
 
-    :param x_ids: numpy array N_LINES x N_CONTEXTS x N_TOKENS, containing ids of all tokens to use
+    :param x_ids: context token ids, numpy array of shape (batch_size, context_len, tokens_num)
     :param index_to_token:
     :return:
     """
     n_samples, n_contexts, n_tokens = x_ids.shape
 
     samples = []
-    for sample_idx in xrange(n_samples):
+    for sample_idx in range(n_samples):
         context_samples = []
-        for cont_idx in xrange(n_contexts):
+        for cont_idx in range(n_contexts):
             sample_tokens = []
-            for token_idx in xrange(n_tokens):
+            for token_idx in range(n_tokens):
                 token_to_add = index_to_token[x_ids[sample_idx, cont_idx, token_idx]]
 
                 if token_to_add == SPECIAL_TOKENS.EOS_TOKEN or token_to_add == SPECIAL_TOKENS.PAD_TOKEN:
@@ -178,9 +173,6 @@ def transform_context_token_ids_to_sentences(x_ids, index_to_token):
                 sample_tokens.append(token_to_add)
 
             sample_str = ' '.join(sample_tokens)
-            if not isinstance(sample_str, unicode):
-                sample_str = sample_str.decode('utf-8')
-
             context_samples.append(sample_str)
         samples.append(' / '.join(context_samples))
     return samples
@@ -192,7 +184,7 @@ def _get_token_vector(token, w2v_model):
     elif token == SPECIAL_TOKENS.PAD_TOKEN:
         return np.zeros(w2v_model.vector_size)
     else:
-        _logger.warn('Can\'t find token [%s] in w2v dict' % token)
+        _logger.warning('Can\'t find token [{}] in w2v dict'.format(token))
         if not hasattr(_get_token_vector, 'unk_vector'):
             if SPECIAL_TOKENS.UNKNOWN_TOKEN in w2v_model.wv.vocab:
                 _get_token_vector.unk_vector = np.array(w2v_model[SPECIAL_TOKENS.UNKNOWN_TOKEN])
@@ -201,45 +193,22 @@ def _get_token_vector(token, w2v_model):
         return _get_token_vector.unk_vector
 
 
-def transform_w2v_model_to_matrix(w2v_model, index_to_token):
-    _logger.info('Preparing embedding matrix based on w2v_model and index_to_token dict')
-
-    token_to_index = {v: k for k, v in index_to_token.items()}
-    tokens_num = len(index_to_token)
-    output = np.zeros((tokens_num, WORD_EMBEDDING_DIMENSION))
-    for token in index_to_token.values():
-        idx = token_to_index[token]
-        output[idx] = _get_token_vector(token, w2v_model)
-
-    return output
-
-
-def get_w2v_embedding_matrix(tokenized_dialog_lines, index_to_token, add_start_end=False):
-    if add_start_end:
-        tokenized_dialog_lines = (
-            [SPECIAL_TOKENS.START_TOKEN] + line + [SPECIAL_TOKENS.EOS_TOKEN] for line in tokenized_dialog_lines)
-
-    w2v_resolver_factory = S3FileResolver.init_resolver(bucket_name=S3_MODELS_BUCKET_NAME, remote_dir=S3_W2V_REMOTE_DIR)
-
-    w2v_model = get_w2v_model(
-        TRAIN_CORPUS_NAME,
-        len(index_to_token),
-        model_resolver_factory=w2v_resolver_factory,
-        tokenized_lines=tokenized_dialog_lines,
-        vec_size=WORD_EMBEDDING_DIMENSION,
-        window_size=W2V_WINDOW_SIZE,
-        skip_gram=USE_SKIP_GRAM)
-    w2v_matrix = transform_w2v_model_to_matrix(w2v_model, index_to_token)
-    return w2v_matrix
-
-
-def get_training_batch(inputs, batch_size, random_permute=False):
+def get_training_batch(inputs, batch_size, random_permute=False, random_seed=RANDOM_SEED):
+    """
+    Generator that yields data in batches. The last batch may be incomplete, yield it as well.
+    :param inputs: tuple of numpy arrays, for example (contexts_ids, responses_ids, conditions_ids)
+    :param batch_size: length of numpy arrays to be yielded for each input
+    :param random_permute: if True input arrays data will be synchronously shuffled before yielding
+    :param random_seed: seed to ensure the identical shuffling of input data for experiments reproducibility
+    :return: generator that yields tuples of numpy arrays with batch_size length
+    """
     n_samples = inputs[0].shape[0]
-    n_batches = n_samples / batch_size
+    n_batches = n_samples // batch_size
     batches_seq = np.arange(n_batches)
     samples_seq = np.arange(n_samples)
 
     if random_permute:
+        np.random.seed(random_seed)
         np.random.shuffle(samples_seq)
 
     for i in batches_seq:
@@ -257,53 +226,6 @@ def get_training_batch(inputs, batch_size, random_permute=False):
         yield tuple(inp[samples_ids] for inp in inputs)
 
 
-def _get_nn_params_str():
-    params_str = 'gru' \
-                 '_hd{hidden_dim}' \
-                 '_drop{dropout_ratio}' \
-                 '_encd{encoder_depth}' \
-                 '_decd{decoder_depth}' \
-                 '_il{input_len}' \
-                 '_cs{context_size}' \
-                 '_ansl{ans_len}' \
-                 '_lr{learning_rate}' \
-                 '_gc_{gradient_clip}' \
-                 '_{learn_emb}' \
-                 '_cdim{condition_dimension}'
-
-    params_str = params_str.format(
-        hidden_dim=HIDDEN_LAYER_DIMENSION,
-        condition_dimension=CONDITION_EMBEDDING_DIMENSION,
-        encoder_depth=ENCODER_DEPTH,
-        decoder_depth=DECODER_DEPTH,
-        dropout_ratio=DENSE_DROPOUT_RATIO,
-        input_len=INPUT_SEQUENCE_LENGTH,
-        context_size=INPUT_CONTEXT_SIZE,
-        ans_len=OUTPUT_SEQUENCE_LENGTH,
-        learning_rate=ADADELTA_LEARNING_RATE,
-        gradient_clip=GRAD_CLIP,
-        learn_emb='learnemb' if TRAIN_WORD_EMBEDDINGS_LAYER else 'fixedemb')
-    return params_str
-
-
-def get_model_vocab_size():
-    index_to_token_path = get_index_to_token_path(BASE_CORPUS_NAME)
-    index_to_token = load_index_to_item(index_to_token_path)
-    return len(index_to_token)
-
-
-def get_model_full_params_str(is_reverse_model=False):
-    w2v_params_str = get_w2v_params_str(
-        get_model_vocab_size(), vec_size=WORD_EMBEDDING_DIMENSION, window_size=W2V_WINDOW_SIZE, skip_gram=USE_SKIP_GRAM)
-    reverse_suffix = ['reverse'] if is_reverse_model else []
-    return '_'.join([BASE_CORPUS_NAME, _get_nn_params_str(), w2v_params_str] + reverse_suffix)
-
-
-def get_model_full_path(is_reverse_model=False):
-    nn_model_path = os.path.join(DATA_DIR, 'nn_models', get_model_full_params_str(is_reverse_model))
-    return nn_model_path
-
-
 def reverse_nn_input(dataset, service_tokens):
     """
     Swaps the last utterance of x with y for each x-y pair in the dataset.
@@ -312,7 +234,7 @@ def reverse_nn_input(dataset, service_tokens):
     """
     # Swap last utterance of x with y, while padding with start- and eos-tokens
     y_output = np.full(dataset.y.shape, service_tokens.pad_token_id, dtype=dataset.y.dtype)
-    for y_output_sample, x_input_sample in izip(y_output, dataset.x[:, -1]):
+    for y_output_sample, x_input_sample in zip(y_output, dataset.x[:, -1]):
         # Write start token at the first index
         y_output_sample[0] = service_tokens.start_token_id
         y_output_token_index = 1
@@ -330,7 +252,7 @@ def reverse_nn_input(dataset, service_tokens):
 
     # Use utterances from y in x while truncating start- and eos-tokens
     x_output = np.full(dataset.x.shape, service_tokens.pad_token_id, dtype=dataset.x.dtype)
-    for x_output_sample, x_input_sample, y_input_sample in izip(x_output, dataset.x[:, :-1], dataset.y):
+    for x_output_sample, x_input_sample, y_input_sample in zip(x_output, dataset.x[:, :-1], dataset.y):
         # Copy all the context utterances except the last one right to the output
         x_output_sample[:-1] = x_input_sample
         x_output_token_index = 0
@@ -359,7 +281,7 @@ def _get_x_data_iterator_with_context(x_data_iterator, y_data_iterator, context_
     context = []
 
     last_y_line = None
-    for x_line, y_line in izip(x_data_iterator, y_data_iterator):
+    for x_line, y_line in zip(x_data_iterator, y_data_iterator):
         if x_line != last_y_line:
             context = []  # clear context if last response != current dialog context (new dialog)
 
@@ -368,7 +290,7 @@ def _get_x_data_iterator_with_context(x_data_iterator, y_data_iterator, context_
         last_y_line = y_line
 
 
-def transform_lines_to_nn_input(tokenized_dialog_lines, token_to_index):
+def transform_lines_to_nn_input(tokenized_dialog_lines, token_to_index, autoencoder_mode=AUTOENCODER_MODE):
     """
     Splits lines (IterableSentences) and generates numpy arrays of token ids suitable for training.
     Doesn't store all lines in memory.
@@ -378,9 +300,11 @@ def transform_lines_to_nn_input(tokenized_dialog_lines, token_to_index):
     _logger.info('Iterating through lines to get number of elements in the dataset')
     n_dialogs = sum(1 for _ in iterator_for_len_calc)
 
-    x_data_iterator = islice(x_data_iterator, 0, None, 2)
-    y_data_iterator = islice(y_data_iterator, 1, None, 2)
-    n_dialogs /= 2
+    if not autoencoder_mode:
+        # seq2seq mode
+        x_data_iterator = islice(x_data_iterator, 0, None, 2)
+        y_data_iterator = islice(y_data_iterator, 1, None, 2)
+        n_dialogs //= 2
 
     y_data_iterator, y_data_iterator_for_context = file_buffered_tee(y_data_iterator)
     x_data_iterator = _get_x_data_iterator_with_context(x_data_iterator, y_data_iterator_for_context)

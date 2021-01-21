@@ -3,9 +3,9 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from cakechat.utils.env import init_theano_env
+from cakechat.utils.env import init_cuda_env
 
-init_theano_env()
+init_cuda_env()
 
 from collections import defaultdict
 
@@ -25,7 +25,7 @@ def _read_testset():
     test_lines = load_file(corpus_path)
 
     testset = defaultdict(set)
-    for i in xrange(0, len(test_lines) - 1, 2):
+    for i in range(0, len(test_lines) - 1, 2):
         context = test_lines[i].strip()
         response = test_lines[i + 1].strip()
         testset[context].add(response)
@@ -37,7 +37,7 @@ def _get_context_to_weighted_responses(nn_model, testset, all_utterances):
     token_to_index = nn_model.token_to_index
 
     all_utterances_ids = transform_lines_to_token_ids(
-        map(get_tokens_sequence, all_utterances), token_to_index, OUTPUT_SEQUENCE_LENGTH, add_start_end=True)
+        list(map(get_tokens_sequence, all_utterances)), token_to_index, OUTPUT_SEQUENCE_LENGTH, add_start_end=True)
 
     context_to_weighted_responses = {}
 
@@ -66,12 +66,12 @@ def _compute_metrics(model, testset):
             compute_retrieval_metric_mean(compute_recall_k, testset, context_to_weighted_responses, top_count=10),
         'mean_recall@25%':
             compute_retrieval_metric_mean(
-                compute_recall_k, testset, context_to_weighted_responses, top_count=test_set_size / 4)
+                compute_recall_k, testset, context_to_weighted_responses, top_count=test_set_size // 4)
     }
 
-    print 'Test set size = %i' % test_set_size
-    for metric_name, metric_value in metrics.iteritems():
-        print '%s = %s' % (metric_name, metric_value)
+    print('Test set size = {}'.format(test_set_size))
+    for metric_name, metric_value in metrics.items():
+        print('{} = {}'.format(metric_name, metric_value))
 
 
 if __name__ == '__main__':

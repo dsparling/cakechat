@@ -1,10 +1,13 @@
 import os
 from functools import partial
 
-from cakechat.utils.files_utils import AbstractFileResolver
+import boto3
+from botocore import UNSIGNED
+from botocore.client import Config
+
+from cakechat.utils.files_utils import AbstractFileResolver, PackageResolver, extract_tar
 from cakechat.utils.logger import WithLogger
-from cakechat.utils.s3.bucket import S3Bucket
-from cakechat.utils.s3.utils import get_s3_resource
+from cakechat.utils.s3 import S3Bucket
 
 
 class S3FileResolver(AbstractFileResolver, WithLogger):
@@ -23,7 +26,6 @@ class S3FileResolver(AbstractFileResolver, WithLogger):
     def init_resolver(**kwargs):
         """
         Method helping to set once some parameters like bucket_name and remote_dir
-
         :param kwargs:
         :return: partially initialized class object
         """
@@ -40,6 +42,17 @@ class S3FileResolver(AbstractFileResolver, WithLogger):
             bucket.download(remote_path, self._file_path)
             return True
         except Exception as e:
-            self._logger.warn('File can not be downloaded from AWS S3 because: %s' % e.message)
+            self._logger.warn('File can not be downloaded from AWS S3 because: %s' % str(e))
 
         return False
+
+
+def get_s3_resource():
+    return boto3.resource('s3', config=Config(signature_version=UNSIGNED))
+
+
+def get_s3_model_resolver(bucket_name, remote_dir):
+    return PackageResolver.init_resolver(
+        package_file_resolver_factory=S3FileResolver.init_resolver(bucket_name=bucket_name, remote_dir=remote_dir),
+        package_file_ext='tar.gz',
+        package_extractor=extract_tar)

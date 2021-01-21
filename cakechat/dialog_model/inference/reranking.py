@@ -1,5 +1,5 @@
 from abc import ABCMeta, abstractmethod
-from itertools import izip_longest
+from itertools import zip_longest
 
 import numpy as np
 
@@ -7,16 +7,14 @@ from cakechat.dialog_model.inference.service_tokens import ServiceTokensIDs
 from cakechat.dialog_model.inference.utils import get_sequence_score_by_thought_vector, get_sequence_score, \
     get_thought_vectors
 from cakechat.dialog_model.model_utils import reverse_nn_input
-from cakechat.utils.dataset_loader import Dataset
+from cakechat.utils.data_types import Dataset
 from cakechat.utils.logger import get_logger
 from cakechat.utils.profile import timer
 
 _logger = get_logger(__name__)
 
 
-class AbstractCandidatesReranker(object):
-    __metaclass__ = ABCMeta
-
+class AbstractCandidatesReranker(object, metaclass=ABCMeta):
     @abstractmethod
     def rerank_candidates(self, contexts, all_candidates, condition_ids):
         pass
@@ -50,13 +48,11 @@ class MMIReranker(AbstractCandidatesReranker):
         self._service_tokens_ids = ServiceTokensIDs(nn_model.token_to_index)
         self._log_repetition_penalization_coefficient = np.log(repetition_penalization_coefficient)
 
-    @timer
     def _compute_likelihood_of_output_given_input(self, thought_vector, candidates, condition_id):
         # Repeat to get same thought vector for each candidate
         thoughts_batch = np.repeat(thought_vector, candidates.shape[0], axis=0)
         return get_sequence_score_by_thought_vector(self._nn_model, thoughts_batch, candidates, condition_id)
 
-    @timer
     def _compute_likelihood_of_input_given_output(self, context, candidates, condition_id):
         # Repeat to get same context for each candidate
         repeated_context = np.repeat(context, candidates.shape[0], axis=0)
@@ -64,7 +60,6 @@ class MMIReranker(AbstractCandidatesReranker):
             Dataset(x=repeated_context, y=candidates, condition_ids=None), self._service_tokens_ids)
         return get_sequence_score(self._reverse_model, reversed_dataset.x, reversed_dataset.y, condition_id)
 
-    @timer
     def _compute_num_repetitions(self, candidates):
         skip_tokens_ids = \
             self._service_tokens_ids.special_tokens_ids + self._service_tokens_ids.non_penalizable_tokens_ids
@@ -75,9 +70,7 @@ class MMIReranker(AbstractCandidatesReranker):
             result.append(num_repetitions)
         return np.array(result)
 
-    @timer
     def _compute_candidates_scores(self, context, candidates, condition_id):
-        _logger.info('Reranking {} candidates...'.format(candidates.shape[0]))
         context = context[np.newaxis, :]  # from (seq_len,) to (1 x seq_len)
         thought_vector = get_thought_vectors(self._nn_model, context)
 
@@ -103,12 +96,12 @@ class MMIReranker(AbstractCandidatesReranker):
         condition_ids = [] if condition_ids is None else condition_ids  # For izip_lingest
         candidates_scores = [
             self._compute_candidates_scores(context, candidates, condition_id)
-            for context, candidates, condition_id in izip_longest(contexts, all_candidates, condition_ids)
+            for context, candidates, condition_id in zip_longest(contexts, all_candidates, condition_ids)
         ]
         scores_order = [np.argsort(-np.array(scores)) for scores in candidates_scores]
         batch_size = len(contexts)
         # reranked_candidates[i][j] = j-th best response for i-th question
         reranked_candidates = [
-            [all_candidates[i][j] for j in scores_order[i]] for i in xrange(batch_size)  # yapf: disable
+            [all_candidates[i][j] for j in scores_order[i]] for i in range(batch_size)  # yapf: disable
         ]
         return reranked_candidates

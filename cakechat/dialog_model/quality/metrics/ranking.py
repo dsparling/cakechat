@@ -5,7 +5,7 @@ from sklearn.metrics import average_precision_score
 def compute_average_precision(expected_answers, weighted_actual_answers, top):
     actual_responses, actual_weights = zip(*weighted_actual_answers.items())
 
-    expected_labels = map(lambda response: int(response in expected_answers), actual_responses)[:top]
+    expected_labels = [int(response in expected_answers) for response in actual_responses][:top]
     actual_weights = actual_weights[:top]
 
     if any(expected_labels):
@@ -20,7 +20,7 @@ def compute_recall_k(expected_answers, weighted_actual_answers, k):
     sorted_k_responses = sorted(
         weighted_actual_answers.keys(), key=lambda response: weighted_actual_answers[response], reverse=True)[:k]
 
-    recall_k = len(set(sorted_k_responses) & set(expected_answers)) / float(len(expected_answers))
+    recall_k = len(set(sorted_k_responses) & set(expected_answers)) / len(expected_answers)
     return recall_k
 
 

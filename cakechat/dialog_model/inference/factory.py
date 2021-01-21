@@ -1,19 +1,7 @@
 from cakechat.config import PREDICTION_MODES
-from cakechat.dialog_model.factory import get_trained_model
 from cakechat.dialog_model.inference.candidates import BeamsearchCandidatesGenerator, SamplingCandidatesGenerator
 from cakechat.dialog_model.inference.predictor import Predictor
 from cakechat.dialog_model.inference.reranking import DummyReranker, MMIReranker
-
-
-def _get_reverse_model():
-    if not hasattr(_get_reverse_model, 'reverse_model'):
-        try:
-            reverse_model = get_trained_model(reverse=True)
-        except:
-            raise ValueError('Can\'t get reverse nn model for prediction. '
-                             'Try to run \'python tools/train.py --reverse\' or switch prediction mode to sampling.')
-        _get_reverse_model.reverse_model = reverse_model
-    return _get_reverse_model.reverse_model
 
 
 def predictor_factory(nn_model, mode, config):
@@ -39,8 +27,7 @@ def predictor_factory(nn_model, mode, config):
         if config['mmi_reverse_model_score_weight'] <= 0:
             raise ValueError('mmi_reverse_model_score_weight should be > 0 for reranking mode')
 
-        reverse_model = _get_reverse_model()
-        reranker = MMIReranker(nn_model, reverse_model, config['mmi_reverse_model_score_weight'],
+        reranker = MMIReranker(nn_model, nn_model.reverse_model, config['mmi_reverse_model_score_weight'],
                                config['repetition_penalization_coefficient'])
     else:
         reranker = DummyReranker()
